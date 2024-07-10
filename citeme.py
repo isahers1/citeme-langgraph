@@ -13,6 +13,9 @@ from PyPDF2 import PdfReader
 import io
 from langchain.pydantic_v1 import BaseModel, Field
 from tqdm import tqdm
+from langsmith.schemas import Run, Example
+from langsmith.evaluation import evaluate
+from langsmith.client import Client
 
 template = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful AI bot. Your name is {name}."),
@@ -65,7 +68,10 @@ def generate_query(state: GraphState):
     return {"cur_search_query":search_query,"previous_queries":previous_queries,"total_steps":total_steps}
 
 def search_node(state: GraphState):
-    docs = sch.search_paper(state['cur_search_query'],limit=5)
+    try:
+        docs = sch.search_paper(state['cur_search_query'],limit=5)
+    except:
+        return {"documents":[],"total_steps":state['total_steps']+1}
     max_index = 0
     while True:
         thing = False
@@ -139,19 +145,24 @@ workflow.add_edge("generate_query","search_node")
 workflow.add_edge(START,"generate_query")
 graph = workflow.compile()
 
-def get_score_of_row(row):
-    answer = graph.invoke({"excerpt":row['excerpt']})
-    if 'final_answer' in answer and answer['final_answer'] == row['target_paper_url']:
-        return 1
-    else:
-        return 0
-
-def run_test():
-    data = pd.read_csv("DATASET.csv")
-    tqdm.pandas(desc="my bar!")
-
-    data["data_score"] = data.progress_apply(lambda row: get_score_of_row(row),axis=1)
-    print(f"ACCURACY: {data['data_score'].mean()}")
-
 if __name__=="__main__":
-    run_test()
+    client = Client()
+    def predict(inputs: dict) -> dict:
+        response = graph.invoke({"excerpt":inputs['excerpt']})
+        target_paper_url = response['final_answer'] if 'final_answer' in response else "NONE"
+        return {"output": target_paper_url}
+
+    # Define evaluators
+    def must_mention(run: Run, example: Example) -> dict:
+        prediction = run.outputs.get("output") or ""
+        required = example.outputs.get("target_paper_url") or []
+        score = int(prediction==required)
+        return {"key":"found_source", "score": score}
+
+    #examples_list = [x for i,x in enumerate(client.list_examples(dataset_name="citeme-dataset")) if i < 1]
+
+    experiment_results = evaluate(
+        predict,
+        data="citeme-dataset",
+        evaluators=[must_mention], 
+    )
